@@ -288,7 +288,11 @@ class MainActivity : AppCompatActivity() {
                     this, cameraSelector, preview
                 )
             } catch (exc: Exception) {
-                // Handle exceptions
+                Toast.makeText(
+                    this,
+                    "Unable to start camera",
+                    Toast.LENGTH_SHORT
+                ).show()
             }
 
         }, ContextCompat.getMainExecutor(this))
@@ -324,7 +328,11 @@ class MainActivity : AppCompatActivity() {
                     this, cameraSelector, preview, imageAnalysis
                 )
             } catch (exc: Exception) {
-                // Handle exceptions
+                Toast.makeText(
+                    this,
+                    "Unable to start camera",
+                    Toast.LENGTH_SHORT
+                ).show()
             }
 
         }, ContextCompat.getMainExecutor(this))
