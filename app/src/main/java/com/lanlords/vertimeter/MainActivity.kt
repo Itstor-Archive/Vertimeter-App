@@ -2,11 +2,16 @@ package com.lanlords.vertimeter
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.provider.MediaStore
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.Toast
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -33,6 +38,8 @@ class MainActivity : AppCompatActivity() {
     private var lensFacing = CameraSelector.LENS_FACING_FRONT
     private var imageAnalysis: ImageAnalysis? = null
 
+    private lateinit var pickVideoLauncher: ActivityResultLauncher<Intent>
+
     private val instructions = listOf(
         "Step back until your entire body is within the camera's frame.",
         "Remain still when the countdown appears.",
@@ -46,14 +53,29 @@ class MainActivity : AppCompatActivity() {
 
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+        pickVideoLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            if (result.resultCode == Activity.RESULT_OK) {
+                val selectedVideoUri = result.data?.data
+                if (selectedVideoUri != null) {
+                    showSettingsDialog {
+                            viewModel.startJumpVideoAnalysis(selectedVideoUri, this@MainActivity)
+                    }
+                }
+            }
+        }
+
         binding.tvDebug.visibility = if (BuildConfig.DEBUG) android.view.View.VISIBLE else android.view.View.GONE
 
         viewModel.countdownTime.observe(this) {
             if (it > 0) {
                 binding.tvCountdown.text = it.toString()
             } else {
-                hideCountdownAndInfo()
+                hideAllDialog()
             }
+        }
+
+        viewModel.toastMessage.observe(this) {
+            Toast.makeText(this, it, Toast.LENGTH_SHORT).show()
         }
 
         viewModel.analysisState.observe(this) {
@@ -69,29 +91,35 @@ class MainActivity : AppCompatActivity() {
 
             when (it) {
                 AnalysisState.NOT_STARTED -> {
-                    hideCountdownAndInfo()
+                    hideAllDialog()
                 }
-
                 AnalysisState.WAITING_FOR_BODY -> {
                     showInfoDialog(InfoType.STEP_BACK)
                 }
-
                 AnalysisState.BODY_IN_FRAME -> {
                     showInfoDialog(InfoType.STOP)
                 }
-
                 AnalysisState.COUNTDOWN -> {
                     showCountdownDialog()
                 }
+                AnalysisState.VIDEO_ANALYZING -> {
+                    showVideoAnalyzeProgressDialog()
+                }
                 AnalysisState.DONE -> {
-                    hideCountdownAndInfo()
+                    hideAllDialog()
                     showResultDialog()
                     stopImageAnalysis()
                 }
                 else -> {
-                    hideCountdownAndInfo()
+                    hideAllDialog()
                 }
             }
+        }
+
+        binding.btnVideoGallery.setOnClickListener {
+            val pickVideoIntent = Intent(Intent.ACTION_PICK, MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
+            pickVideoLauncher.launch(pickVideoIntent)
+
         }
 
         binding.btnSwitchCamera.setOnClickListener {
@@ -142,10 +170,18 @@ class MainActivity : AppCompatActivity() {
         cameraExecutor.shutdown()
     }
 
+    private fun showVideoAnalyzeProgressDialog() {
+        binding.flCountdown.visibility = android.view.View.GONE
+        binding.flInfo.visibility = android.view.View.GONE
+
+        binding.flVideoProcessing.visibility = android.view.View.VISIBLE
+    }
+
     @SuppressLint("SetTextI18n")
     private fun showInfoDialog(type: InfoType) {
         // Hide countdown
         binding.flCountdown.visibility = android.view.View.GONE
+        binding.flVideoProcessing.visibility = android.view.View.GONE
 
         when (type) {
             InfoType.STEP_BACK -> {
@@ -164,23 +200,25 @@ class MainActivity : AppCompatActivity() {
 
     private fun showCountdownDialog() {
         binding.flInfo.visibility = android.view.View.GONE
+        binding.flVideoProcessing.visibility = android.view.View.GONE
         binding.flCountdown.visibility = android.view.View.VISIBLE
     }
 
-    private fun hideCountdownAndInfo() {
+    private fun hideAllDialog() {
         binding.flInfo.visibility = android.view.View.GONE
         binding.flCountdown.visibility = android.view.View.GONE
+        binding.flVideoProcessing.visibility = android.view.View.GONE
     }
 
     private fun showResultDialog() {
         val df = java.text.DecimalFormat("#.##")
 
         MaterialAlertDialogBuilder(this).setTitle("Result")
-            .setMessage("You jumped ${df.format(viewModel._jumpResult!!.jumpHeight)} cm high!\n" +
-                    "Your jump duration was ${df.format(viewModel._jumpResult!!.jumpDuration)} seconds.")
+            .setMessage("You jumped ${df.format(viewModel.jumpResult!!.jumpHeight)} cm high!\n" +
+                    "Your jump duration was ${df.format(viewModel.jumpResult!!.jumpDuration)} seconds.")
             .setPositiveButton("Detail") { _, _ ->
                 val intent = android.content.Intent(this, ResultActivity::class.java)
-                intent.putExtra(ResultActivity.JUMP_RESULT, viewModel._jumpResult)
+                intent.putExtra(ResultActivity.JUMP_RESULT, viewModel.jumpResult)
                 viewModel.reset()
                 startActivity(intent)}
             .setNeutralButton("Close") { _, _ -> viewModel.reset()}.show()
@@ -217,7 +255,7 @@ class MainActivity : AppCompatActivity() {
         builder.show()
     }
 
-    private fun showSettingsDialog() {
+    private fun showSettingsDialog(onClickSave: (() -> Unit)? = null) {
         val editText = EditText(this)
         val frameLayout = FrameLayout(this)
 
@@ -252,6 +290,7 @@ class MainActivity : AppCompatActivity() {
                 editText.text.toString().toIntOrNull()?.let { height ->
                     if (height > 0) {
                         viewModel.setHeight(height)
+                        if (onClickSave != null) onClickSave()
                         Toast.makeText(this, "Height saved", Toast.LENGTH_SHORT).show()
                         dialog.dismiss()
                     } else {

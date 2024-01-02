@@ -1,11 +1,6 @@
 package com.lanlords.vertimeter
 
 import android.util.Log
-import androidx.annotation.OptIn
-import androidx.camera.core.ExperimentalGetImage
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageProxy
-import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.pose.Pose
 import com.google.mlkit.vision.pose.PoseDetection
 import com.google.mlkit.vision.pose.PoseLandmark
@@ -14,8 +9,7 @@ import kotlin.math.abs
 import kotlin.math.pow
 import kotlin.math.sqrt
 
-
-class JumpAnalyzer(private val activity: MainActivity) : ImageAnalysis.Analyzer {
+class JumpVideoAnalyzer(private val frameRate: Float) {
     private val poseLandmarks = listOf(
         PoseLandmark.LEFT_SHOULDER,
         PoseLandmark.RIGHT_SHOULDER,
@@ -47,61 +41,21 @@ class JumpAnalyzer(private val activity: MainActivity) : ImageAnalysis.Analyzer 
             .build()
     )
 
-    private var bodyInFrameStartTime: Long? = null
-    private val requiredDurationInFrame: Long = 2000 // 2 seconds
+    var pixelToCentiScale: Float? = null
+    var shoulderReference: Vector2? = null
+    var leftFootReference: Vector2? = null
+    var rightFootReference: Vector2? = null
 
-    private var pixelToCentiScale: Float? = null
-    private var shoulderReference: Vector2? = null
-    private var leftFootReference: Vector2? = null
-    private var rightFootReference: Vector2? = null
-
-    private var jumpStartTime: Long? = null
-    private var startTime: Long? = null
+    private var jumpStartFrame: Int? = null
     private var maxJumpHeight = 0f
 
     private var jumpData = mutableMapOf<Float, Float>()
 
-    @OptIn(ExperimentalGetImage::class)
-    override fun analyze(imageProxy: ImageProxy) {
-        val mediaImage = imageProxy.image
-        if (mediaImage != null) {
-            val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
-
-            poseDetector.process(image)
-                .addOnSuccessListener { poses ->
-                    when (activity.viewModel.analysisState.value) {
-                        AnalysisState.WAITING_FOR_BODY -> {
-                            if (isBodyInFrame(poses)) {
-                                handleBodyInFrame()
-                            } else {
-                                activity.setDebugText(message = "Body not in frame")
-                                activity.viewModel.setAnalysisState(AnalysisState.WAITING_FOR_BODY)
-                                bodyInFrameStartTime = null
-                            }
-                        }
-
-                        AnalysisState.BODY_IN_FRAME -> handleBodyInFrame()
-                        AnalysisState.COUNTDOWN -> handleCountdownState(poses)
-                        AnalysisState.CAMERA_ANALYZING -> analyzeJump(poses)
-                        else -> {}
-                    }
-                }
-                .addOnFailureListener { e ->
-                    Log.e("PoseAnalysis", "Pose detection failed: $e")
-                }
-                .addOnCompleteListener {
-                    imageProxy.close()
-                }
-        }
-    }
-
-    private fun analyzeJump(poses: Pose) {
+    fun analyzeJump(poses: Pose, frame: Int, onAnalyzeFinish: (maxJumpHeight: Float, jumpDuration: Float, jumpData: MutableMap<Float, Float>) -> Unit) {
         val leftShoulderLandmark = poses.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)
         val rightShoulderLandmark = poses.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER)
         val leftFootLandmark = poses.getPoseLandmark(PoseLandmark.LEFT_FOOT_INDEX)
         val rightFootLandmark = poses.getPoseLandmark(PoseLandmark.RIGHT_FOOT_INDEX)
-
-        if (startTime == null) startTime = System.currentTimeMillis()
 
         leftShoulderLandmark?.let { leftShoulder ->
             rightShoulderLandmark?.let { rightShoulder ->
@@ -115,13 +69,13 @@ class JumpAnalyzer(private val activity: MainActivity) : ImageAnalysis.Analyzer 
 
                         val jumpHeight = currentShoulderVec.distanceYTo(shoulderReference!!) * pixelToCentiScale!!
 
-                        val currentTimeSec = (System.currentTimeMillis() - startTime!!).toFloat() / 1000f
+                        val currentTimeSec = (frame.toFloat() / frameRate)
 
                         jumpData[currentTimeSec] = jumpHeight
 
                         // When off the ground
                         if (currentLeftFootVec.y < leftFootReference!!.y && currentRightFootVec.y < rightFootReference!!.y) {
-                            if (jumpStartTime == null) jumpStartTime = System.currentTimeMillis()
+                            if (jumpStartFrame == null) jumpStartFrame = frame
 
                             if (jumpHeight > maxJumpHeight) {
                                 maxJumpHeight = jumpHeight
@@ -131,13 +85,14 @@ class JumpAnalyzer(private val activity: MainActivity) : ImageAnalysis.Analyzer 
                         }
 
                         // When back on the ground
-                        if (currentLeftFootVec.y > leftFootReference!!.y && currentRightFootVec.y > rightFootReference!!.y && jumpStartTime != null) {
-                            val jumpDuration = System.currentTimeMillis() - jumpStartTime!!
-                            val jumpDurationSec = jumpDuration.toFloat() / 1000f
-                            jumpStartTime = null
+                        if (currentLeftFootVec.y > leftFootReference!!.y && currentRightFootVec.y > rightFootReference!!.y && jumpStartFrame != null) {
+                            val jumpDuration = frame - jumpStartFrame!!
+                            val jumpDurationSec = jumpDuration.toFloat() / frameRate
+                            jumpStartFrame = null
 
-                            activity.viewModel.setJumpResult(maxJumpHeight, jumpDurationSec, jumpData)
-                            activity.viewModel.setAnalysisState(AnalysisState.DONE)
+                            Log.d("PoseAnalysis", "Jump duration: $jumpDurationSec")
+
+                            onAnalyzeFinish(maxJumpHeight, jumpDurationSec, jumpData)
                         }
                     }
                 }
@@ -145,30 +100,7 @@ class JumpAnalyzer(private val activity: MainActivity) : ImageAnalysis.Analyzer 
         }
     }
 
-    private fun handleBodyInFrame() {
-        bodyInFrameStartTime = bodyInFrameStartTime ?: System.currentTimeMillis()
-        val timeInFrame = System.currentTimeMillis() - bodyInFrameStartTime!!
-
-        if (timeInFrame >= requiredDurationInFrame) {
-            Log.d("PoseAnalysis", "Body in frame for 2 seconds")
-            activity.setDebugText(message = "Body in frame for 2 seconds")
-            activity.viewModel.startJumpCameraAnalysis()
-            bodyInFrameStartTime = null
-        } else {
-            Log.d("PoseAnalysis", "Body in frame for ${timeInFrame} milliseconds")
-            activity.setDebugText(message = "Body in frame")
-            activity.viewModel.setAnalysisState(AnalysisState.BODY_IN_FRAME)
-        }
-    }
-
-    private fun handleCountdownState(poses: Pose) {
-        if (pixelToCentiScale == null) {
-            calculatePixelToCentiScale(poses)
-            setLandmarkReference(poses)
-        }
-    }
-
-    private fun calculatePixelToCentiScale(poses: Pose) {
+    fun calculatePixelToCentiScale(poses: Pose, height: Int) {
         val noseLandmark = poses.getPoseLandmark(PoseLandmark.NOSE)
         val rightAnkleLandmark = poses.getPoseLandmark(PoseLandmark.RIGHT_ANKLE)
         val leftAnkleLandmark = poses.getPoseLandmark(PoseLandmark.LEFT_ANKLE)
@@ -186,14 +118,15 @@ class JumpAnalyzer(private val activity: MainActivity) : ImageAnalysis.Analyzer 
                     val heightPixel = sqrt(hypotenuse.pow(2) - heelDistance.pow(2))
 
                     pixelToCentiScale =
-                        (activity.viewModel.height.value!! / heightPixel / 2.53).toFloat()
-                    activity.setDebugText(pxToCmScale = pixelToCentiScale!!)
+                        (height / heightPixel / 2.53).toFloat()
+
+                    Log.d("PoseAnalysis", "Pixel to centi scale: $pixelToCentiScale")
                 }
             }
         }
     }
 
-    private fun setLandmarkReference(pose: Pose) {
+    fun setLandmarkReference(pose: Pose) {
         val leftShoulderLandmark = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)
         val rightShoulderLandmark = pose.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER)
         val leftFootLandmark = pose.getPoseLandmark(PoseLandmark.LEFT_FOOT_INDEX)
